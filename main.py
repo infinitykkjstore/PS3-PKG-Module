@@ -58,13 +58,16 @@ def _decrypt_finalized(enc, iv, aes_key):
     return bytes(a ^ b for a, b in zip(enc, ks))
 
 
-def _decrypt_non_finalized(enc, hdr_digest, arcade=False):
+def _decrypt_non_finalized(enc, hdr_digest, arcade=False, block_start=0):
     k = bytearray(64)
     k[0:8] = hdr_digest[0:8]; k[8:16] = hdr_digest[0:8]
     k[16:24] = hdr_digest[0:8] if arcade else hdr_digest[8:16]
     k[24:32] = hdr_digest[8:16]
     if arcade:
         k[32:56] = b'\xA0' * 0x18
+    for _ in range(block_start):
+        ctr = _u64(bytes(k), 0x38) + 1
+        k[0x38:0x40] = struct.pack('>Q', ctr)
     bfr = bytearray(hashlib.sha1(bytes(k)).digest()[:0x1C])
     out = bytearray(len(enc))
     for i in range(len(enc)):
@@ -155,6 +158,7 @@ class PS3PKG:
             self.reader = LocalPkgReader(str(source))
         self._parse_header()
         self._file_table_dec = None
+        self._alt_key = None
 
     def _parse_header(self):
         d = self.reader.read_at(0, 0xC0)
@@ -170,6 +174,7 @@ class PS3PKG:
         self.data_off = _u64(d, 0x20)
         self.data_sz = _u64(d, 0x28)
         self.content_id = d[0x30:0x60].rstrip(b'\x00').decode('ascii', errors='replace')
+        self.digest = d[0x60:0x70]
         self.iv = d[0x70:0x80]
         self.header_digest = d[0x80:0xC0]
 
@@ -182,9 +187,18 @@ class PS3PKG:
         self.is_finalized = self.pkg_revision == 0x8000
 
     def _decrypt(self, data, offset_in_data):
+        block = offset_in_data // 16
         if self.is_finalized:
-            return _decrypt_finalized(data, _inc_ctr(self.iv, offset_in_data // 16), self.aes_key)
-        return _decrypt_non_finalized(data, self.header_digest)
+            return _decrypt_finalized(data, _inc_ctr(self.iv, block), self.aes_key)
+        if self._alt_key:
+            return _decrypt_non_finalized(data, self._alt_key, block_start=block)
+        result = _decrypt_non_finalized(data, self.header_digest, block_start=block)
+        if len(result) >= 16:
+            ts = _u32(result, 0)
+            if ts == 0 or ts > self.data_sz or ts % 32 != 0:
+                self._alt_key = self.digest
+                result = _decrypt_non_finalized(data, self.digest, block_start=block)
+        return result
 
     def _decrypt_at(self, offset, size):
         if size == 0:
@@ -225,6 +239,10 @@ class PS3PKG:
                 name = self._decrypt_at(no, ns).rstrip(b'\x00').decode('ascii', errors='replace')
 
             name = name.replace('/', os.sep)
+            parts = name.split(os.sep)
+            while parts and parts[0] == '..':
+                parts.pop(0)
+            name = os.sep.join(parts)
 
             if is_dir:
                 if not flat:
