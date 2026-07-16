@@ -362,6 +362,7 @@ def main():
     mode.add_argument('--pic0', action='store_true', help='Extrai apenas PIC0.PNG')
     mode.add_argument('--icon', action='store_true', help='Extrai apenas ICON0.PNG')
     mode.add_argument('--path', metavar='CAMINHO', help='Extrai arquivo especifico do PKG (ex: /USRDIR/EBOOT.BIN)')
+    mode.add_argument('--content-id', action='store_true', help='Apenas exibe o Content ID sem extrair nada')
     args = parser.parse_args()
 
     src = args.source
@@ -388,6 +389,9 @@ def main():
     print(f'Items: {pkg.item_cnt}')
     print(f'Total: {pkg.total_size} bytes')
     print(f'Source: {src}')
+
+    if args.content_id:
+        return
 
     out = os.path.join(os.getcwd(), args.output)
     try:

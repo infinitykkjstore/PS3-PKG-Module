@@ -69,9 +69,10 @@ python main.py Sonic_the_Hedgehog_2.pkg
 | `--pic0` | Extrai apenas o `PIC0.PNG` (raiz) — sem criar pastas |
 | `--icon` | Extrai apenas o `ICON0.PNG` (raiz) — sem criar pastas |
 | `--path CAMINHO` | Extrai qualquer arquivo específico informando o caminho dentro do PKG (ex: `/USRDIR/EBOOT.BIN`) — sem criar pastas |
+| `--content-id` | Apenas exibe o Content ID do PKG e sai — **não extrai nada** |
 | `-o DIR` / `--output DIR` | Diretório de saída (padrão: `PS3`) |
 
-Todas as flags de modo são **mutuamente exclusivas**: use apenas uma por vez.
+Todas as flags de modo (exceto `-o`) são **mutuamente exclusivas**: use apenas uma por vez.
 
 ### Exemplos
 
@@ -128,6 +129,24 @@ python main.py "http://cdn.example.com/game.pkg" --eboot
 ```bash
 python main.py "http://cdn.example.com/game.pkg" --icon
 ```
+
+#### Apenas exibir o Content ID (sem extrair)
+
+```bash
+python main.py "http://cdn.example.com/game.pkg" --content-id
+```
+
+Saída:
+```
+Platform: PS3
+Finalized: True
+Content ID: UP0177-NPUB30443_00-SVCSONIC2XXXXXXX
+Items: 16
+Total: 35433776 bytes
+Source: http://cdn.example.com/game.pkg
+```
+
+O PKG é aberto e as informações são exibidas, mas **nenhum arquivo é extraído**.
 
 #### Extrair arquivo específico com `--path`
 
