@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
-PS3 Custom PKG Builder - Monta um .pkg custom a partir de ./custom/
-A estrutura de diretorios em custom/ espelha o HDD do PS3:
-    custom/dev_hdd0/... -> /dev_hdd0/... no console
+PS3 PKG Builder - Monta .pkg custom ou retail a partir de diretorio local
+
+Modos:
+  custom (padrao):  paths com prefixo ../../dev_hdd0/... (para CFW)
+  retail (--retail): paths relativos, ex: USRDIR/EBOOT.BIN (para OFW)
+
+Uso:
+  python pkg_builder.py custom/                    -> PKG custom
+  python pkg_builder.py --retail extracao/ -c ID   -> PKG retail
+  python pkg_builder.py --retail extracao/ --rap game.rap -c ID
 """
 import os, sys, struct, hashlib, argparse
 
@@ -11,9 +18,6 @@ PKG_MAGIC = 0x7F504B47
 TYPE_RAW = 3
 TYPE_DIRECTORY = 4
 FLAG_OVERWRITE = 0x80000000
-
-PREFIX_PATH = b'../../'
-PREFIX_LEN = len(PREFIX_PATH)
 
 
 def _u64(d, o):
@@ -62,9 +66,24 @@ def _aligned(v, a=16):
     return (v + a - 1) & ~(a - 1)
 
 
-def build_pkg(input_dir, content_id, output_path):
+def _detect_content_type(input_dir):
+    sfo = os.path.join(input_dir, 'PARAM.SFO')
+    eboot = os.path.join(input_dir, 'USRDIR', 'EBOOT.BIN')
+    if os.path.exists(sfo) and os.path.exists(eboot):
+        return 5   # GameExec
+    if os.path.exists(sfo):
+        return 4   # GameData
+    return 9       # Theme (custom padrao)
+
+
+def build_pkg(input_dir, content_id, output_path, retail=False, rap_data=None):
     input_dir = os.path.normpath(input_dir) + os.sep
     base_len = len(input_dir)
+
+    prefix_path = b'' if retail else b'../../'
+    prefix_len = len(prefix_path)
+
+    content_type = 9 if not retail else _detect_content_type(input_dir)
 
     files = []
 
@@ -113,7 +132,7 @@ def build_pkg(input_dir, content_id, output_path):
     # Phase 1: assign fileNameOff (after all entries)
     name_off = 0x20 * item_cnt
     for f in files:
-        name_len = PREFIX_LEN + len(f['name'])
+        name_len = prefix_len + len(f['name'])
         aligned = _aligned(name_len)
         f['name_off'] = name_off
         f['name_len_aligned'] = aligned
@@ -140,7 +159,7 @@ def build_pkg(input_dir, content_id, output_path):
 
     # Phase 3: pack names
     for f in files:
-        raw_name = PREFIX_PATH + f['name'].encode('ascii', errors='replace')
+        raw_name = prefix_path + f['name'].encode('ascii', errors='replace')
         raw_name += b'\x00' * (f['name_len_aligned'] - f['name_len_total'])
         first_enc += raw_name
 
@@ -167,8 +186,10 @@ def build_pkg(input_dir, content_id, output_path):
     # Update header with QADigest
     header = header[:0x60] + qa_digest + header[0x70:]
 
-    # --- compute KLicensee (encrypted zeros using QADigest, counter=0xFFFFFFFFFFFFFFFF) ---
-    licensee_enc = _crypt_at_ctr(b'\x00' * 16, qa_digest, 0xFFFFFFFFFFFFFFFF)
+    # --- compute KLicensee ---
+    # Se rap_data foi fornecido, ele é usado como plaintext; se nao, usa 16 zeros
+    licensee_plain = rap_data if rap_data else b'\x00' * 16
+    licensee_enc = _crypt_at_ctr(licensee_plain[:16].ljust(16, b'\x00'), qa_digest, 0xFFFFFFFFFFFFFFFF)
     header = header[:0x70] + licensee_enc
 
     data_size = len(first_enc) + len(file_data)
@@ -198,7 +219,7 @@ def build_pkg(input_dir, content_id, output_path):
             3,    # drmType (Free)
             2,    # unk4
             4,    # unk21
-            9,    # contentType (Theme, default for custom)
+            content_type,  # contentType (9=Theme/custom, 5=GameExec, 4=GameData)
             3,    # unk23
             4,    # unk24
             0xE,  # packageType (normal)
@@ -236,17 +257,32 @@ def build_pkg(input_dir, content_id, output_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='PS3 Custom PKG Builder')
+    parser = argparse.ArgumentParser(
+        description='PS3 PKG Builder - Cria PKGs custom ou retail')
     parser.add_argument('input_dir', nargs='?', default='custom',
-                        help='Diretorio com estrutura de HDD (padrao: custom)')
+                        help='Diretorio com os arquivos (padrao: custom/)')
     parser.add_argument('-o', '--output', help='Arquivo .pkg de saida')
     parser.add_argument('-c', '--content-id', default='CUSTOM-INSTALLER_00-0000000000000000',
                         help='Content ID (padrao: CUSTOM-INSTALLER_00-0000000000000000)')
+    parser.add_argument('--retail', action='store_true',
+                        help='Modo retail: sem prefixo ../../, content-type auto')
+    parser.add_argument('--rap', metavar='ARQUIVO.rap',
+                        help='Arquivo .rap de licenca (16 bytes)')
     args = parser.parse_args()
 
     if not os.path.isdir(args.input_dir):
         print(f'[ERRO] Diretorio nao encontrado: {args.input_dir}', file=sys.stderr)
         sys.exit(1)
+
+    rap_data = None
+    if args.rap:
+        if not os.path.isfile(args.rap):
+            print(f'[ERRO] Arquivo .rap nao encontrado: {args.rap}', file=sys.stderr)
+            sys.exit(1)
+        with open(args.rap, 'rb') as fh:
+            rap_data = fh.read()
+        if len(rap_data) != 16:
+            print(f'[AVISO] Arquivo .rap tem {len(rap_data)} bytes (esperado 16)')
 
     if args.output:
         out_path = args.output
@@ -254,9 +290,16 @@ def main():
         out_path = args.content_id + '.pkg'
 
     try:
-        total = build_pkg(args.input_dir, args.content_id, out_path)
+        total = build_pkg(args.input_dir, args.content_id, out_path,
+                          retail=args.retail, rap_data=rap_data)
         print(f'PKG criado: {out_path} ({total} bytes)')
         print(f'Content ID: {args.content_id}')
+        print(f'Modo: {"retail" if args.retail else "custom"}')
+        if args.rap:
+            rap_out = out_path.rsplit('.', 1)[0] + '.rap'
+            with open(rap_out, 'wb') as fh:
+                fh.write(rap_data)
+            print(f'RAP copiado: {rap_out}')
     except Exception as e:
         print(f'[ERRO] {e}', file=sys.stderr)
         sys.exit(1)
