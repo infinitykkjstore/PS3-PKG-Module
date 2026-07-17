@@ -110,6 +110,48 @@ RAP copiado: saida.rap
 
 ---
 
+## SFO (`sfo_maker.py` / `sfo_editor.py`)
+
+Cria e edita arquivos `PARAM.SFO` do PS3 via CLI ou como módulo Python.
+
+### CLI — Criar SFO
+
+```bash
+# Cria PARAM.SFO com valores padrão
+python sfo_maker.py
+
+# Cria com valores customizados
+python sfo_maker.py -o game.sfo --title "Meu Jogo" --title-id "GAME00001" --category "HG"
+```
+
+| Flag | Padrão (valor real) | Descrição |
+|------|---------------------|-----------|
+| `-o ARQUIVO` | `PARAM.SFO` | Arquivo de saída |
+| `--title` | `The Simpsons - Road Rage` | Título do jogo |
+| `--title-id` | `SLUS20305` | Title ID |
+| `--category` | `2P` | Categoria (HG, DG, 2P, etc) |
+| `--bootable` | `1` | Flag bootável (0 ou 1) |
+| `--attribute` | `0` | Atributo |
+| `--parental-level` | `0` | Nível de controle parental |
+| `--ps3-system-ver` | `03.4000` | Versão mínima do sistema |
+| `--region-deny` | `0` | Flags de negação regional |
+
+### CLI — Editar/Visualizar SFO
+
+```bash
+# Visualizar conteúdo
+python sfo_editor.py PARAM.SFO
+
+# Editar campos (faz backup .bak automaticamente)
+python sfo_editor.py PARAM.SFO --title "Novo Título" --title-id "BLUS99999"
+python sfo_editor.py PARAM.SFO --category "DG" --bootable 0
+python sfo_editor.py PARAM.SFO --set TITLE="Outro" --set BOOTABLE=1
+
+# Salvar em outro arquivo (sem modificar o original)
+python sfo_editor.py PARAM.SFO -o editado.sfo --title "Editado"
+```
+---
+
 ## Aceleração C (`build_deps.py`)
 
 Compila a extensão nativa para acelerar a descriptografia de PKGs non-finalized.

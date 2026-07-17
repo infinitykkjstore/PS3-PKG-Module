@@ -56,10 +56,20 @@ def _inc_ctr(ctr, n=1):
     return bytes(c)
 
 
-def _decrypt_finalized(enc, iv, aes_key):
+def _make_key64(digest):
+    k = bytearray(64)
+    k[0:8] = digest[0:8]
+    k[8:16] = digest[0:8]
+    k[16:24] = digest[8:16]
+    k[24:32] = digest[8:16]
+    return k
+
+
+def _decrypt_finalized(enc, iv, aes_key, offset=0):
+    block_start = offset // 16
     nb = (len(enc) + 15) // 16
     buf = bytearray(nb * 16)
-    ctr = bytearray(iv)
+    ctr = bytearray(_inc_ctr(iv, block_start))
     for i in range(nb):
         off = i * 16
         buf[off:off+16] = ctr
@@ -71,43 +81,23 @@ def _decrypt_finalized(enc, iv, aes_key):
     return bytes(a ^ b for a, b in zip(enc, ks))
 
 
-def _make_key64(digest):
-    k = bytearray(64)
-    k[0:8] = digest[0:8]
-    k[8:16] = digest[0:8]
-    k[16:24] = digest[8:16]
-    k[24:32] = digest[8:16]
-    return k
-
-
-def _decrypt_non_finalized(enc, digest, block_start=0):
+def _decrypt_non_finalized(enc, digest, offset=0):
+    block_start = offset // 16
     k = _make_key64(digest)
-    for _ in range(block_start):
-        ctr = _u64(bytes(k), 0x38) + 1
-        k[0x38:0x40] = struct.pack('>Q', ctr)
-    bfr = bytearray(hashlib.sha1(bytes(k)).digest()[:0x1C])
-    out = bytearray(len(enc))
-    for i in range(len(enc)):
-        if i and i % 16 == 0:
-            ctr = _u64(bytes(k), 0x38) + 1
-            k[0x38:0x40] = struct.pack('>Q', ctr)
-            bfr[:] = hashlib.sha1(bytes(k)).digest()[:0x1C]
-        out[i] = enc[i] ^ bfr[i & 0xF]
-    return bytes(out)
+    ctr_val = _u64(bytes(k), 0x38) + block_start
+    k[0x38:0x40] = struct.pack('>Q', ctr_val)
 
-
-def _decrypt_bulk_non_finalized(enc, digest):
-    k = _make_key64(digest)
-    out = bytearray(len(enc))
-    if HAVE_PKGCRYPT:
+    if HAVE_PKGCRYPT and offset == 0:
         return pkgcrypt.pkgcrypt(bytes(k), enc, len(enc))
+
+    out = bytearray(len(enc))
     for i in range(0, len(enc), 16):
         chunk = min(16, len(enc) - i)
         h = hashlib.sha1(bytes(k)).digest()
         for j in range(chunk):
             out[i + j] = enc[i + j] ^ h[j]
-        ctr = _u64(bytes(k), 0x38) + 1
-        k[0x38:0x40] = struct.pack('>Q', ctr)
+        ctr_val += 1
+        k[0x38:0x40] = struct.pack('>Q', ctr_val)
     return bytes(out)
 
 
@@ -180,6 +170,9 @@ class RemotePkgReader(PkgReader):
 
 # --- PKG ---
 
+CHUNK_SIZE = 4 * 1024 * 1024  # 4 MB streaming chunk
+
+
 class PS3PKG:
     def __init__(self, source):
         if isinstance(source, PkgReader):
@@ -190,7 +183,8 @@ class PS3PKG:
             self.reader = LocalPkgReader(str(source))
         self._parse_header()
         self._alt_key = None
-        self._decrypted_data = None
+        self._digest = None
+        self._digest_probed = False
 
     def _parse_header(self):
         d = self.reader.read_at(0, 0xC0)
@@ -218,36 +212,36 @@ class PS3PKG:
             raise ValueError(f'Unknown PKG type: {self.pkg_type}')
         self.is_finalized = self.pkg_revision == 0x8000
 
-    def _ensure_decrypted(self):
-        if self._decrypted_data is not None:
+    def _probe_digest(self):
+        if self._digest_probed:
             return
-        if self.is_finalized:
-            raw = self.reader.read_at(self.data_off, self.data_sz)
-            self._decrypted_data = _decrypt_finalized(raw, self.iv, self.aes_key)
-            return
+        raw = self.reader.read_at(self.data_off, 32)
+        probe = _decrypt_non_finalized(raw, self.header_digest)
+        ts = _u32(probe, 0)
+        if ts == 0 or ts > self.data_sz or ts % 32 != 0:
+            self._alt_key = self.digest
+            self._digest = self.digest
+        else:
+            self._digest = self.header_digest
+        self._digest_probed = True
 
-        raw = self.reader.read_at(self.data_off, self.data_sz)
-        digest = self.header_digest
-        if len(raw) >= 16:
-            probe = _decrypt_bulk_non_finalized(raw[:32], self.header_digest)
-            ts = _u32(probe, 0)
-            if ts == 0 or ts > self.data_sz or ts % 32 != 0:
-                self._alt_key = self.digest
-                digest = self.digest
-        self._decrypted_data = _decrypt_bulk_non_finalized(raw, digest)
+    def _read_decrypted(self, offset, size):
+        if not self.is_finalized:
+            self._probe_digest()
+        enc = self.reader.read_at(self.data_off + offset, size)
+        if self.is_finalized:
+            return _decrypt_finalized(enc, self.iv, self.aes_key, offset)
+        return _decrypt_non_finalized(enc, self._digest, offset)
 
     def _get_file_table(self):
-        self._ensure_decrypted()
-        dec = self._decrypted_data
-        ffo = _u32(dec, 12)
+        hdr = self._read_decrypted(0, 16)
+        ffo = _u32(hdr, 12)
         if ffo > self.data_sz:
             raise ValueError(f'Invalid file table offset: 0x{ffo:x} > data_sz 0x{self.data_sz:x}')
-        return dec[:ffo]
+        return self._read_decrypted(0, ffo)
 
     def _extract_filtered(self, out_dir, file_filter, flat=False):
         os.makedirs(out_dir, exist_ok=True)
-        self._ensure_decrypted()
-        dec = self._decrypted_data
         ft = self._get_file_table()
         num_files = _u32(ft, 0) // 32
         extracted = 0
@@ -262,7 +256,8 @@ class PS3PKG:
             if ct == 0x90:
                 name = ft[no:no + ns].rstrip(b'\x00').decode('ascii', errors='replace')
             else:
-                name = dec[no:no + ns].rstrip(b'\x00').decode('ascii', errors='replace')
+                nd = self._read_decrypted(no, ns)
+                name = nd.rstrip(b'\x00').decode('ascii', errors='replace')
 
             name = name.replace('/', os.sep)
             parts = name.split(os.sep)
@@ -279,12 +274,19 @@ class PS3PKG:
                 else:
                     fp = os.path.join(out_dir, name)
                     os.makedirs(os.path.dirname(fp), exist_ok=True)
+
                 if ct == 0x90:
-                    data = ft[fo:fo + fs]
+                    with open(fp, 'wb') as f:
+                        f.write(ft[fo:fo + fs])
                 else:
-                    data = dec[fo:fo + fs]
-                with open(fp, 'wb') as f:
-                    f.write(data)
+                    with open(fp, 'wb') as f:
+                        off = fo
+                        remain = fs
+                        while remain > 0:
+                            chunk = min(CHUNK_SIZE, remain)
+                            f.write(self._read_decrypted(off, chunk))
+                            off += chunk
+                            remain -= chunk
                 extracted += 1
 
         return extracted
@@ -308,8 +310,6 @@ class PS3PKG:
         return self._extract_filtered(out_dir, lambda n: os.path.basename(n) == 'ICON0.PNG', flat=True)
 
     def _list_files(self):
-        self._ensure_decrypted()
-        dec = self._decrypted_data
         ft = self._get_file_table()
         num_files = _u32(ft, 0) // 32
         names = []
@@ -324,7 +324,8 @@ class PS3PKG:
             if ct == 0x90:
                 name = ft[no:no + ns].rstrip(b'\x00').decode('ascii', errors='replace')
             else:
-                name = dec[no:no + ns].rstrip(b'\x00').decode('ascii', errors='replace')
+                nd = self._read_decrypted(no, ns)
+                name = nd.rstrip(b'\x00').decode('ascii', errors='replace')
             names.append(name)
         return names
 
